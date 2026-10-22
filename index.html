@@ -29,7 +29,8 @@
     input, button { min-height: 44px; font-size: 16px; }
     input { flex: 1 1 220px; max-width: 100%; }
     #settings input { flex: 0 0 auto; }
-    .time-range { display: inline-flex; align-items: center; gap: .5rem; }
+    .time-range, .duration { display: inline-flex; align-items: center; gap: .5rem; }
+    #settings #duration { width: 5rem; }
     .card { flex: 1 1 220px; max-width: 320px; }
 
     @media (max-width: 600px) {
@@ -40,6 +41,7 @@
       .time-range { display: flex; align-items: center; gap: .5rem; width: 100%; }
       #settings .time-range input { flex: 1 1 0; min-width: 0; width: auto; }
       .time-range span { flex: 0 0 auto; }
+      .duration { justify-content: center; }
       .cards { flex-direction: column; align-items: stretch; }
       .card { width: 100%; max-width: none; padding: 1rem 1.25rem; }
       .rank { font-size: 1.6rem; }
@@ -60,9 +62,14 @@
   <div id="settings">
     <span class="settings-label">Start a run between</span>
     <span class="time-range">
-      <input type="time" id="fromTime" value="05:00" step="3600">
+      <input type="time" id="fromTime" value="05:00">
       <span>and</span>
-      <input type="time" id="toTime" value="22:00" step="3600">
+      <input type="time" id="toTime" value="22:00">
+    </span>
+    <span class="duration">
+      <label for="duration">Run duration</label>
+      <input type="number" id="duration" value="45" min="1" max="240" inputmode="numeric">
+      <span>min</span>
     </span>
   </div>
 
@@ -77,14 +84,39 @@
     const searchInput = document.getElementById('searchInput');
     const fromInput = document.getElementById('fromTime');
     const toInput = document.getElementById('toTime');
+    const durationInput = document.getElementById('duration');
     let lastLocation = null;
 
-    fromInput.value = localStorage.getItem('runFrom') || fromInput.value;
-    toInput.value = localStorage.getItem('runTo') || toInput.value;
+    function setCookie(name, value) {
+      document.cookie = `${name}=${encodeURIComponent(value)}; max-age=${60 * 60 * 24 * 365}; path=/; SameSite=Lax`;
+      try { localStorage.setItem(name, value); } catch { }
+    }
 
-    [fromInput, toInput].forEach(input => input.addEventListener('change', () => {
-      localStorage.setItem('runFrom', fromInput.value);
-      localStorage.setItem('runTo', toInput.value);
+    function getCookie(name) {
+      const match = document.cookie.split('; ').find(c => c.startsWith(name + '='));
+      if (match) return decodeURIComponent(match.slice(name.length + 1));
+      try { return localStorage.getItem(name); } catch { return null; }
+    }
+
+    function getDuration() {
+      const v = parseInt(durationInput.value, 10);
+      return Number.isFinite(v) && v > 0 ? Math.min(v, 240) : 45;
+    }
+
+    function toMinutes(value, fallback) {
+      if (!value) return fallback;
+      const [h, m] = value.split(':').map(Number);
+      return h * 60 + m;
+    }
+
+    fromInput.value = getCookie('runFrom') || fromInput.value;
+    toInput.value = getCookie('runTo') || toInput.value;
+    durationInput.value = getCookie('runDuration') || durationInput.value;
+
+    [fromInput, toInput, durationInput].forEach(input => input.addEventListener('change', () => {
+      setCookie('runFrom', fromInput.value);
+      setCookie('runTo', toInput.value);
+      setCookie('runDuration', getDuration());
       if (lastLocation) run(lastLocation.lat, lastLocation.lon, lastLocation.label);
     }));
 
@@ -108,20 +140,13 @@
       cardsEl.innerHTML = '';
       const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}` +
         '&hourly=apparent_temperature,temperature_2m,precipitation_probability,precipitation,wind_speed_10m,uv_index,relative_humidity_2m,is_day' +
-        '&timezone=auto&forecast_days=1';
+        '&timezone=auto&forecast_days=2';
       const res = await fetch(url);
       if (!res.ok) throw new Error('Weather service unavailable');
       const data = await res.json();
       const d = data.hourly;
 
-      // Current hour in the location's own timezone
-      const nowHour = new Date(Date.now() + data.utc_offset_seconds * 1000).getUTCHours();
-      const fromHour = parseInt(fromInput.value || '0', 10);
-      const toHour = parseInt(toInput.value || '23', 10);
-
-      const hours = d.time.map((time, i) => ({
-        time,
-        hour: +time.slice(11, 13),
+      const hourly = d.time.map((time, i) => ({
         temp: d.temperature_2m[i],
         apparentTemp: d.apparent_temperature[i],
         precipProb: d.precipitation_probability[i] ?? 0,
@@ -130,55 +155,103 @@
         uv: d.uv_index[i] ?? 0,
         humidity: d.relative_humidity_2m[i],
         isDay: d.is_day[i] === 1
-      })).filter(h => h.hour >= fromHour && h.hour <= toHour && h.hour >= nowHour);
+      }));
 
-      if (!hours.length) {
-        statusEl.textContent = `No running hours left today in ${label} between ${fromInput.value} and ${toInput.value}.`;
+      // Linearly interpolate the hourly forecast at a minute offset from today's midnight.
+      function conditionsAt(min) {
+        const i = Math.min(Math.floor(min / 60), hourly.length - 2);
+        const f = (min - i * 60) / 60;
+        const a = hourly[i], b = hourly[i + 1];
+        const lerp = k => a[k] + (b[k] - a[k]) * f;
+        return {
+          temp: lerp('temp'), apparentTemp: lerp('apparentTemp'), precipProb: lerp('precipProb'),
+          precip: lerp('precip'), wind: lerp('wind'), uv: lerp('uv'), humidity: lerp('humidity'),
+          isDay: f < 0.5 ? a.isDay : b.isDay
+        };
+      }
+
+      const duration = getDuration();
+      const now = new Date(Date.now() + data.utc_offset_seconds * 1000);
+      const nowMin = now.getUTCHours() * 60 + now.getUTCMinutes();
+      const fromMin = toMinutes(fromInput.value, 0);
+      const toMin = toMinutes(toInput.value, 23 * 60 + 45);
+      const maxMin = (hourly.length - 1) * 60;
+
+      // Every quarter hour is a candidate start; score is the average over the whole run.
+      const slots = [];
+      for (let start = Math.ceil(Math.max(fromMin, nowMin) / 15) * 15; start <= toMin && start + duration <= maxMin; start += 15) {
+        const samples = [];
+        for (let t = start; t < start + duration; t += 15) samples.push(conditionsAt(t));
+        const avg = k => samples.reduce((s, c) => s + c[k], 0) / samples.length;
+        slots.push({
+          start,
+          score: Math.round(samples.reduce((s, c) => s + scoreHour(c), 0) / samples.length),
+          temp: avg('temp'), apparentTemp: avg('apparentTemp'), precipProb: avg('precipProb'),
+          wind: avg('wind'), uv: avg('uv'), humidity: avg('humidity')
+        });
+      }
+
+      if (!slots.length) {
+        statusEl.textContent = `No running times left today in ${label} between ${fromInput.value} and ${toInput.value}.`;
         return;
       }
 
-      hours.forEach(h => h.score = scoreHour(h));
-
-      // Pick the 3 best hours, at least 2 hours apart so they are distinct moments.
+      // Pick the 3 best starts, far enough apart so the runs don't overlap.
+      const gap = Math.max(duration, 60);
       const best = [];
-      for (const h of [...hours].sort((a, b) => b.score - a.score)) {
-        if (best.every(b => Math.abs(b.hour - h.hour) >= 2)) best.push(h);
+      for (const s of [...slots].sort((a, b) => b.score - a.score || a.start - b.start)) {
+        if (best.every(b => Math.abs(b.start - s.start) >= gap)) best.push(s);
         if (best.length === 3) break;
       }
+
+      const fmt = min => `${String(Math.floor(min / 60) % 24).padStart(2, '0')}:${String(min % 60).padStart(2, '0')}`;
 
       statusEl.textContent = `Forecast for ${label}`;
       const medals = ['🥇', '🥈', '🥉'];
       cardsEl.innerHTML = best.map((h, i) => `
         <div class="card">
           <div class="rank">${medals[i]}</div>
-          <div class="time">${h.time.slice(11, 16)}</div>
-          <div class="score">Score: ${h.score}/100</div>
+          <div class="time">${fmt(h.start)}</div>
+          <div class="score">until ${fmt(h.start + duration)} · Score: ${h.score}/100</div>
           <ul>
             <li>🌡️ ${h.temp.toFixed(0)}°C (feels ${h.apparentTemp.toFixed(0)}°C)</li>
-            <li>🌧️ ${h.precipProb}% rain</li>
+            <li>🌧️ ${h.precipProb.toFixed(0)}% rain</li>
             <li>💨 ${h.wind.toFixed(0)} km/h wind</li>
             <li>☀️ UV ${h.uv.toFixed(1)}</li>
-            <li>💧 ${h.humidity}% humidity</li>
+            <li>💧 ${h.humidity.toFixed(0)}% humidity</li>
           </ul>
         </div>`).join('');
     }
 
     function run(lat, lon, label) {
       lastLocation = { lat, lon, label };
+      setCookie('lastLocation', JSON.stringify(lastLocation));
       load(lat, lon, label).catch(err => statusEl.textContent = 'Error: ' + err.message);
+    }
+
+    function getSavedLocation() {
+      try {
+        const loc = JSON.parse(getCookie('lastLocation'));
+        return loc && Number.isFinite(loc.lat) && Number.isFinite(loc.lon) ? loc : null;
+      } catch { return null; }
     }
 
     function useBrowserLocation() {
       resultsEl.innerHTML = '';
+      const fallback = message => {
+        const saved = getSavedLocation();
+        if (saved) run(saved.lat, saved.lon, saved.label);
+        else statusEl.textContent = message;
+      };
       if (!navigator.geolocation) {
-        statusEl.textContent = 'Your browser does not support geolocation. Use the search box instead.';
+        fallback('Your browser does not support geolocation. Use the search box instead.');
         return;
       }
       statusEl.textContent = 'Getting your location…';
       navigator.geolocation.getCurrentPosition(
         pos => run(pos.coords.latitude, pos.coords.longitude,
           `your location (${pos.coords.latitude.toFixed(2)}, ${pos.coords.longitude.toFixed(2)})`),
-        () => statusEl.textContent = 'Location access denied. Use the search box to pick a location.'
+        () => fallback('Location access denied. Use the search box to pick a location.')
       );
     }
 
@@ -214,7 +287,14 @@
     });
 
     document.getElementById('geoBtn').onclick = useBrowserLocation;
-    useBrowserLocation();
+
+    const savedLocation = getSavedLocation();
+    if (savedLocation) {
+      run(savedLocation.lat, savedLocation.lon, savedLocation.label);
+    } else {
+      useBrowserLocation();
+    }
   </script>
 </body>
+</html>
 </html>
