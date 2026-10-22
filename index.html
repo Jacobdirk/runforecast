@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Best Times to Run Today</title>
+  <style>
+    body { font-family: system-ui, sans-serif; background: linear-gradient(135deg, #1e3c72, #2a5298); color: #fff; min-height: 100vh; margin: 0; display: flex; flex-direction: column; align-items: center; padding: 2rem 1rem; }
+    #status { opacity: .8; margin: 1rem 0 1.5rem; }
+    form { display: flex; gap: .5rem; flex-wrap: wrap; justify-content: center; }
+    input { padding: .6rem .8rem; border: 0; border-radius: 8px; font-size: 1rem; width: 220px; }
+    button { padding: .6rem 1rem; border: 0; border-radius: 8px; cursor: pointer; font-size: 1rem; }
+    #results { display: flex; flex-direction: column; gap: .3rem; margin-top: .5rem; }
+    #results button { background: rgba(255,255,255,.15); color: #fff; text-align: left; }
+    #results button:hover { background: rgba(255,255,255,.3); }
+    .cards { display: flex; flex-wrap: wrap; gap: 1rem; justify-content: center; }
+    .card { background: rgba(255,255,255,.12); border-radius: 16px; padding: 1.25rem 1.5rem; width: 220px; }
+    .rank { font-size: 2rem; }
+    .time { font-size: 1.8rem; font-weight: bold; margin: .25rem 0; }
+    .score { font-size: .9rem; opacity: .8; margin-bottom: .5rem; }
+    .card ul { list-style: none; padding: 0; margin: 0; line-height: 1.6; }
+  </style>
+</head>
+<body>
+  <h1>🏃 Best Times to Run Today</h1>
+
+  <form id="searchForm">
+    <input id="searchInput" type="text" placeholder="Search a city, e.g. Urk" required>
+    <button type="submit">Search</button>
+    <button type="button" id="geoBtn">📍 Use my location</button>
+  </form>
+  <div id="results"></div>
+
+  <div id="status">Getting your location…</div>
+  <div class="cards" id="cards"></div>
+
+  <script>
+    const statusEl = document.getElementById('status');
+    const cardsEl = document.getElementById('cards');
+    const resultsEl = document.getElementById('results');
+    const searchForm = document.getElementById('searchForm');
+    const searchInput = document.getElementById('searchInput');
+
+    // Higher is better. Ideal "feels like" temperature is about 10-15°C.
+    function scoreHour(h) {
+      let s = 100;
+      const t = h.apparentTemp;
+      if (t < 10) s -= (10 - t) * 3;
+      else if (t > 15) s -= (t - 15) * 4;
+      s -= h.precipProb * 0.5;
+      s -= h.precip * 20;
+      if (h.wind > 15) s -= (h.wind - 15) * 1.5;
+      s -= h.uv * 4;
+      if (h.humidity > 70) s -= (h.humidity - 70) * 0.5;
+      if (!h.isDay) s -= 25;
+      return Math.max(0, Math.round(s));
+    }
+
+    async function load(lat, lon, label) {
+      statusEl.textContent = 'Fetching the forecast…';
+      cardsEl.innerHTML = '';
+      const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}` +
+        '&hourly=apparent_temperature,temperature_2m,precipitation_probability,precipitation,wind_speed_10m,uv_index,relative_humidity_2m,is_day' +
+        '&timezone=auto&forecast_days=1';
+      const res = await fetch(url);
+      if (!res.ok) throw new Error('Weather service unavailable');
+      const data = await res.json();
+      const d = data.hourly;
+
+      // Current hour in the location's own timezone
+      const nowHour = new Date(Date.now() + data.utc_offset_seconds * 1000).getUTCHours();
+
+      const hours = d.time.map((time, i) => ({
+        time,
+        hour: +time.slice(11, 13),
+        temp: d.temperature_2m[i],
+        apparentTemp: d.apparent_temperature[i],
+        precipProb: d.precipitation_probability[i] ?? 0,
+        precip: d.precipitation[i] ?? 0,
+        wind: d.wind_speed_10m[i],
+        uv: d.uv_index[i] ?? 0,
+        humidity: d.relative_humidity_2m[i],
+        isDay: d.is_day[i] === 1
+      })).filter(h => h.hour >= 5 && h.hour <= 22 && h.hour >= nowHour);
+
+      if (!hours.length) {
+        statusEl.textContent = `No running hours left today in ${label}. Check again tomorrow!`;
+        return;
+      }
+
+      hours.forEach(h => h.score = scoreHour(h));
+
+      // Pick the 3 best hours, at least 2 hours apart so they are distinct moments.
+      const best = [];
+      for (const h of [...hours].sort((a, b) => b.score - a.score)) {
+        if (best.every(b => Math.abs(b.hour - h.hour) >= 2)) best.push(h);
+        if (best.length === 3) break;
+      }
+
+      statusEl.textContent = `Forecast for ${label}`;
+      const medals = ['🥇', '🥈', '🥉'];
+      cardsEl.innerHTML = best.map((h, i) => `
+        <div class="card">
+          <div class="rank">${medals[i]}</div>
+          <div class="time">${h.time.slice(11, 16)}</div>
+          <div class="score">Score: ${h.score}/100</div>
+          <ul>
+            <li>🌡️ ${h.temp.toFixed(0)}°C (feels ${h.apparentTemp.toFixed(0)}°C)</li>
+            <li>🌧️ ${h.precipProb}% rain</li>
+            <li>💨 ${h.wind.toFixed(0)} km/h wind</li>
+            <li>☀️ UV ${h.uv.toFixed(1)}</li>
+            <li>💧 ${h.humidity}% humidity</li>
+          </ul>
+        </div>`).join('');
+    }
+
+    function run(lat, lon, label) {
+      load(lat, lon, label).catch(err => statusEl.textContent = 'Error: ' + err.message);
+    }
+
+    function useBrowserLocation() {
+      resultsEl.innerHTML = '';
+      if (!navigator.geolocation) {
+        statusEl.textContent = 'Your browser does not support geolocation. Use the search box instead.';
+        return;
+      }
+      statusEl.textContent = 'Getting your location…';
+      navigator.geolocation.getCurrentPosition(
+        pos => run(pos.coords.latitude, pos.coords.longitude,
+          `your location (${pos.coords.latitude.toFixed(2)}, ${pos.coords.longitude.toFixed(2)})`),
+        () => statusEl.textContent = 'Location access denied. Use the search box to pick a location.'
+      );
+    }
+
+    searchForm.addEventListener('submit', async e => {
+      e.preventDefault();
+      const query = searchInput.value.trim();
+      if (!query) return;
+      resultsEl.innerHTML = '';
+      statusEl.textContent = 'Searching…';
+      try {
+        const res = await fetch('https://geocoding-api.open-meteo.com/v1/search?count=5&language=en&name=' + encodeURIComponent(query));
+        if (!res.ok) throw new Error('Search service unavailable');
+        const places = (await res.json()).results || [];
+        if (!places.length) {
+          statusEl.textContent = `No places found for "${query}".`;
+          return;
+        }
+        statusEl.textContent = 'Pick a location:';
+        places.forEach(p => {
+          const label = [p.name, p.admin1, p.country].filter(Boolean).join(', ');
+          const btn = document.createElement('button');
+          btn.type = 'button';
+          btn.textContent = label;
+          btn.onclick = () => {
+            resultsEl.innerHTML = '';
+            run(p.latitude, p.longitude, label);
+          };
+          resultsEl.appendChild(btn);
+        });
+      } catch (err) {
+        statusEl.textContent = 'Error: ' + err.message;
+      }
+    });
+
+    document.getElementById('geoBtn').onclick = useBrowserLocation;
+    useBrowserLocation();
+  </script>
+</body>
+</html>
