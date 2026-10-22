@@ -13,6 +13,8 @@
     #results { display: flex; flex-direction: column; gap: .3rem; margin-top: .5rem; }
     #results button { background: rgba(255,255,255,.15); color: #fff; text-align: left; }
     #results button:hover { background: rgba(255,255,255,.3); }
+    #settings { margin-top: 1rem; display: flex; gap: .5rem; align-items: center; flex-wrap: wrap; justify-content: center; }
+    #settings input { width: auto; }
     .cards { display: flex; flex-wrap: wrap; gap: 1rem; justify-content: center; }
     .card { background: rgba(255,255,255,.12); border-radius: 16px; padding: 1.25rem 1.5rem; width: 220px; }
     .rank { font-size: 2rem; }
@@ -31,6 +33,13 @@
   </form>
   <div id="results"></div>
 
+  <div id="settings">
+    Start a run between
+    <input type="time" id="fromTime" value="05:00" step="3600">
+    and
+    <input type="time" id="toTime" value="22:00" step="3600">
+  </div>
+
   <div id="status">Getting your location…</div>
   <div class="cards" id="cards"></div>
 
@@ -40,6 +49,18 @@
     const resultsEl = document.getElementById('results');
     const searchForm = document.getElementById('searchForm');
     const searchInput = document.getElementById('searchInput');
+    const fromInput = document.getElementById('fromTime');
+    const toInput = document.getElementById('toTime');
+    let lastLocation = null;
+
+    fromInput.value = localStorage.getItem('runFrom') || fromInput.value;
+    toInput.value = localStorage.getItem('runTo') || toInput.value;
+
+    [fromInput, toInput].forEach(input => input.addEventListener('change', () => {
+      localStorage.setItem('runFrom', fromInput.value);
+      localStorage.setItem('runTo', toInput.value);
+      if (lastLocation) run(lastLocation.lat, lastLocation.lon, lastLocation.label);
+    }));
 
     // Higher is better. Ideal "feels like" temperature is about 10-15°C.
     function scoreHour(h) {
@@ -69,6 +90,8 @@
 
       // Current hour in the location's own timezone
       const nowHour = new Date(Date.now() + data.utc_offset_seconds * 1000).getUTCHours();
+      const fromHour = parseInt(fromInput.value || '0', 10);
+      const toHour = parseInt(toInput.value || '23', 10);
 
       const hours = d.time.map((time, i) => ({
         time,
@@ -81,10 +104,10 @@
         uv: d.uv_index[i] ?? 0,
         humidity: d.relative_humidity_2m[i],
         isDay: d.is_day[i] === 1
-      })).filter(h => h.hour >= 5 && h.hour <= 22 && h.hour >= nowHour);
+      })).filter(h => h.hour >= fromHour && h.hour <= toHour && h.hour >= nowHour);
 
       if (!hours.length) {
-        statusEl.textContent = `No running hours left today in ${label}. Check again tomorrow!`;
+        statusEl.textContent = `No running hours left today in ${label} between ${fromInput.value} and ${toInput.value}.`;
         return;
       }
 
@@ -115,6 +138,7 @@
     }
 
     function run(lat, lon, label) {
+      lastLocation = { lat, lon, label };
       load(lat, lon, label).catch(err => statusEl.textContent = 'Error: ' + err.message);
     }
 
