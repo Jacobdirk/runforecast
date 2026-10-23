@@ -29,7 +29,9 @@
     input, button { min-height: 44px; font-size: 16px; }
     input { flex: 1 1 220px; max-width: 100%; }
     #settings input { flex: 0 0 auto; }
-    .time-range, .duration { display: inline-flex; align-items: center; gap: .5rem; }
+    .time-range, .duration, .run-date { display: inline-flex; align-items: center; gap: .5rem; }
+    .day-arrow { background: rgba(255,255,255,.2); color: #fff; padding: .6rem .8rem; }
+    .day-arrow:disabled { opacity: .35; cursor: default; }
     #settings #duration { width: 5rem; }
     .card { flex: 1 1 220px; max-width: 320px; }
     .card.warning { outline: 2px solid #ffb300; }
@@ -57,7 +59,7 @@
       .time-range { display: flex; align-items: center; gap: .5rem; width: 100%; }
       #settings .time-range input { flex: 1 1 0; min-width: 0; width: auto; }
       .time-range span { flex: 0 0 auto; }
-      .duration { justify-content: center; }
+      .duration, .run-date { justify-content: center; }
       .cards { flex-direction: column; align-items: stretch; }
       .card { width: 100%; max-width: none; padding: 1rem 1.25rem; }
       .rank { font-size: 1.6rem; }
@@ -76,13 +78,19 @@
 
   <div class="tab" id="mainTab">
   <form id="searchForm">
-    <input id="searchInput" type="text" placeholder="Search a city, e.g. Urk" required>
+    <input id="searchInput" type="text" placeholder="Search a city, e.g. New York" required>
     <button type="submit">Search</button>
     <button type="button" id="geoBtn">📍 Use my location</button>
   </form>
   <div id="results"></div>
 
   <div id="settings">
+    <span class="run-date">
+      <label for="runDate">Date</label>
+      <button type="button" id="prevDay" class="day-arrow" aria-label="Previous day">◀</button>
+      <input type="date" id="runDate" autocomplete="off">
+      <button type="button" id="nextDay" class="day-arrow" aria-label="Next day">▶</button>
+    </span>
     <span class="settings-label">Start a run between</span>
     <span class="time-range">
       <input type="time" id="fromTime" value="05:00">
@@ -124,7 +132,20 @@
     const fromInput = document.getElementById('fromTime');
     const toInput = document.getElementById('toTime');
     const durationInput = document.getElementById('duration');
+    const dateInput = document.getElementById('runDate');
     let lastLocation = null;
+
+    const isoDate = d => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    const today = new Date();
+    const maxDate = new Date(today);
+    maxDate.setDate(today.getDate() + 14);
+    dateInput.min = isoDate(today);
+    dateInput.max = isoDate(maxDate);
+    dateInput.value = isoDate(today);
+    window.addEventListener('pageshow', () => {
+      if (!dateInput.value) dateInput.value = isoDate(new Date());
+      updateDayArrows();
+    });
 
     function setSetting(name, value) {
       try { localStorage.setItem(name, value); } catch { }
@@ -249,6 +270,34 @@
     toInput.value = getSetting('runTo') || toInput.value;
     durationInput.value = getSetting('runDuration') || durationInput.value;
 
+    dateInput.addEventListener('change', () => {
+      if (!dateInput.value || dateInput.value < dateInput.min) dateInput.value = dateInput.min;
+      if (dateInput.value > dateInput.max) dateInput.value = dateInput.max;
+      updateDayArrows();
+      rerun();
+    });
+
+    const prevDayBtn = document.getElementById('prevDay');
+    const nextDayBtn = document.getElementById('nextDay');
+
+    function updateDayArrows() {
+      prevDayBtn.disabled = !dateInput.value || dateInput.value <= dateInput.min;
+      nextDayBtn.disabled = !dateInput.value || dateInput.value >= dateInput.max;
+    }
+
+    function shiftDay(delta) {
+      const [y, m, d] = (dateInput.value || dateInput.min).split('-').map(Number);
+      const next = isoDate(new Date(y, m - 1, d + delta));
+      if (next < dateInput.min || next > dateInput.max) return;
+      dateInput.value = next;
+      updateDayArrows();
+      rerun();
+    }
+
+    prevDayBtn.onclick = () => shiftDay(-1);
+    nextDayBtn.onclick = () => shiftDay(1);
+    updateDayArrows();
+
     [fromInput, toInput, durationInput].forEach(input => input.addEventListener('change', () => {
       setSetting('runFrom', fromInput.value);
       setSetting('runTo', toInput.value);
@@ -276,13 +325,22 @@
       cardsEl.innerHTML = '';
       const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}` +
         '&hourly=apparent_temperature,temperature_2m,precipitation_probability,precipitation,wind_speed_10m,uv_index,relative_humidity_2m,is_day' +
-        '&timezone=auto&forecast_days=2';
+        `&timezone=auto&forecast_days=16`;
       const res = await fetch(url);
       if (!res.ok) throw new Error('Weather service unavailable');
       const data = await res.json();
       const d = data.hourly;
 
-      const hourly = d.time.map((time, i) => ({
+      const now = new Date(Date.now() + data.utc_offset_seconds * 1000);
+      const locToday = now.toISOString().slice(0, 10);
+      if (!dateInput.value) dateInput.value = locToday;
+      let selDate = dateInput.value;
+      if (selDate < locToday) selDate = dateInput.value = locToday;
+      const firstIndex = d.time.findIndex(t => t.startsWith(selDate));
+      if (firstIndex < 0) throw new Error('No forecast available for that date');
+      const isToday = selDate === locToday;
+
+      const hourly = d.time.slice(firstIndex, firstIndex + 48).map((time, j) => j + firstIndex).map(i => ({
         temp: d.temperature_2m[i],
         apparentTemp: d.apparent_temperature[i],
         precipProb: d.precipitation_probability[i] ?? 0,
@@ -307,8 +365,7 @@
       }
 
       const duration = getDuration();
-      const now = new Date(Date.now() + data.utc_offset_seconds * 1000);
-      const nowMin = now.getUTCHours() * 60 + now.getUTCMinutes();
+      const nowMin = isToday ? now.getUTCHours() * 60 + now.getUTCMinutes() : 0;
       const fromMin = toMinutes(fromInput.value, 0);
       const toMin = toMinutes(toInput.value, 23 * 60 + 45);
       const maxMin = (hourly.length - 1) * 60;
@@ -329,7 +386,7 @@
       }
 
       if (!slots.length) {
-        statusEl.textContent = `No running times left today in ${label} between ${fromInput.value} and ${toInput.value}.`;
+        statusEl.textContent = `No running times left ${isToday ? 'today' : 'on ' + selDate} in ${label} between ${fromInput.value} and ${toInput.value}.`;
         return;
       }
 
