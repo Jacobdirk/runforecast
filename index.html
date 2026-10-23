@@ -43,7 +43,7 @@
     .tab[hidden] { display: none; }
     .panel { width: 100%; max-width: 720px; background: rgba(255,255,255,.12); border-radius: 16px; padding: 1rem 1.25rem; margin-bottom: 1rem; }
     .panel h2 { font-size: 1.15rem; margin: 0 0 .75rem; }
-    .weight { display: grid; grid-template-columns: 9rem 1fr 3rem; align-items: center; gap: .5rem; margin: .4rem 0; }
+    .weight { display: grid; grid-template-columns: 6.5rem 1fr 2.5rem; align-items: center; gap: .5rem; margin: 1rem 0; }
     .weight input { width: 100%; min-height: auto; padding: 0; flex: none; }
     .weight output { text-align: right; }
     .block-row { display: flex; align-items: center; gap: .5rem; margin: .4rem 0; }
@@ -64,7 +64,7 @@
       .card { width: 100%; max-width: none; padding: 1rem 1.25rem; }
       .rank { font-size: 1.6rem; }
       .time { font-size: 1.5rem; }
-      .weight { grid-template-columns: 7rem 1fr 2.5rem; }
+      .weight { grid-template-columns: 6rem 1fr 2.5rem; }
     }
   </style>
 </head>
@@ -164,9 +164,9 @@
     }
 
     const weightDefs = [
-      { key: 'temp', label: '🌡️ Temperature' },
-      { key: 'rainChance', label: '🌧️ Rain chance' },
-      { key: 'rain', label: '☔ Rain amount' },
+      { key: 'temp', label: '🌡️ Temp' },
+      { key: 'rainChance', label: '🌧️ Rain %' },
+      { key: 'rain', label: '☔ Rain mm' },
       { key: 'wind', label: '💨 Wind' },
       { key: 'uv', label: '☀️ UV' },
       { key: 'humidity', label: '💧 Humidity' },
