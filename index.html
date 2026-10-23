@@ -50,6 +50,10 @@
     .block-row input { flex: 1 1 0; min-width: 0; width: auto; }
     .block-row button { background: rgba(255,255,255,.2); color: #fff; }
     .hint { font-size: .85rem; opacity: .8; margin: .25rem 0 .5rem; }
+    .location-slot, .location-block { width: 100%; display: flex; flex-direction: column; align-items: center; }
+    .location-slot:empty { display: none; }
+    #searchStatus { text-align: center; }
+    #searchStatus:empty { display: none; }
 
     @media (max-width: 600px) {
       body { padding: 1rem .75rem; }
@@ -77,12 +81,17 @@
   </div>
 
   <div class="tab" id="mainTab">
+  <div id="plannerLocation" class="location-slot">
+  <div id="locationBlock" class="location-block">
   <form id="searchForm">
     <input id="searchInput" type="text" placeholder="Search a city, e.g. New York" required>
     <button type="submit">Search</button>
     <button type="button" id="geoBtn">📍 Use my location</button>
   </form>
+  <div id="searchStatus" class="hint"></div>
   <div id="results"></div>
+  </div>
+  </div>
 
   <div id="settings">
     <span class="run-date">
@@ -109,6 +118,11 @@
   </div>
 
   <div class="tab" id="settingsTab" hidden>
+    <div class="panel">
+      <h2>Location</h2>
+      <p class="hint" id="currentLocation">No location set.</p>
+      <div id="settingsLocation" class="location-slot"></div>
+    </div>
     <div class="panel">
       <h2>Score weights</h2>
       <p class="hint">How much each factor counts. 0 = ignore, 1 = default, 3 = very important.</p>
@@ -426,10 +440,32 @@
         </div>`).join('');
     }
 
+    const locationBlock = document.getElementById('locationBlock');
+    const searchStatusEl = document.getElementById('searchStatus');
+    const currentLocationEl = document.getElementById('currentLocation');
+
+    // Show the search on the planner only while no location is set; otherwise it lives in Settings.
+    function placeLocationBlock() {
+      const target = document.getElementById(lastLocation ? 'settingsLocation' : 'plannerLocation');
+      if (locationBlock.parentElement !== target) target.appendChild(locationBlock);
+      currentLocationEl.textContent = lastLocation ? `Current: ${lastLocation.label}` : 'No location set.';
+    }
+
     function run(lat, lon, label) {
       lastLocation = { lat, lon, label };
       setSetting('lastLocation', JSON.stringify(lastLocation));
+      searchStatusEl.textContent = '';
+      placeLocationBlock();
       load(lat, lon, label).catch(err => statusEl.textContent = 'Error: ' + err.message);
+    }
+
+    async function cityName(lat, lon) {
+      try {
+        const res = await fetch(`https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${lat}&longitude=${lon}&localityLanguage=en`);
+        if (!res.ok) return null;
+        const r = await res.json();
+        return [r.city || r.locality, r.countryName].filter(Boolean).join(', ') || null;
+      } catch { return null; }
     }
 
     function getSavedLocation() {
@@ -444,16 +480,19 @@
       const fallback = message => {
         const saved = getSavedLocation();
         if (saved) run(saved.lat, saved.lon, saved.label);
-        else statusEl.textContent = message;
+        else statusEl.textContent = searchStatusEl.textContent = message;
       };
       if (!navigator.geolocation) {
         fallback('Your browser does not support geolocation. Use the search box instead.');
         return;
       }
-      statusEl.textContent = 'Getting your location…';
+      statusEl.textContent = searchStatusEl.textContent = 'Getting your location…';
       navigator.geolocation.getCurrentPosition(
-        pos => run(pos.coords.latitude, pos.coords.longitude,
-          `your location (${pos.coords.latitude.toFixed(2)}, ${pos.coords.longitude.toFixed(2)})`),
+        async pos => {
+          const { latitude: lat, longitude: lon } = pos.coords;
+          const city = await cityName(lat, lon);
+          run(lat, lon, city ? `your location (${city})` : `your location (${lat.toFixed(2)}, ${lon.toFixed(2)})`);
+        },
         () => fallback('Location access denied. Use the search box to pick a location.')
       );
     }
@@ -463,16 +502,16 @@
       const query = searchInput.value.trim();
       if (!query) return;
       resultsEl.innerHTML = '';
-      statusEl.textContent = 'Searching…';
+      searchStatusEl.textContent = 'Searching…';
       try {
         const res = await fetch('https://geocoding-api.open-meteo.com/v1/search?count=5&language=en&name=' + encodeURIComponent(query));
         if (!res.ok) throw new Error('Search service unavailable');
         const places = (await res.json()).results || [];
         if (!places.length) {
-          statusEl.textContent = `No places found for "${query}".`;
+          searchStatusEl.textContent = `No places found for "${query}".`;
           return;
         }
-        statusEl.textContent = 'Pick a location:';
+        searchStatusEl.textContent = 'Pick a location:';
         places.forEach(p => {
           const label = [p.name, p.admin1, p.country].filter(Boolean).join(', ');
           const btn = document.createElement('button');
@@ -485,7 +524,7 @@
           resultsEl.appendChild(btn);
         });
       } catch (err) {
-        statusEl.textContent = 'Error: ' + err.message;
+        searchStatusEl.textContent = 'Error: ' + err.message;
       }
     });
 
