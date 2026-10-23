@@ -50,6 +50,13 @@
     .block-row input { flex: 1 1 0; min-width: 0; width: auto; }
     .block-row button { background: rgba(255,255,255,.2); color: #fff; }
     .hint { font-size: .85rem; opacity: .8; margin: .25rem 0 .5rem; }
+    .rain-panel { width: 100%; max-width: 720px; display: flex; flex-wrap: wrap; gap: 1rem; margin-top: 1rem; }
+    .rain-panel[hidden] { display: none; }
+    .rain-panel .hint { width: 100%; text-align: center; margin: 0; }
+    .chart { flex: 1 1 300px; background: rgba(255,255,255,.12); border-radius: 16px; padding: .75rem 1rem; }
+    .chart h3 { font-size: 1rem; margin: 0 0 .5rem; }
+    .chart svg { width: 100%; height: auto; display: block; }
+    .chart svg text { fill: #fff; font-size: 10px; opacity: .85; }
     .location-slot, .location-block { width: 100%; display: flex; flex-direction: column; align-items: center; }
     .location-slot:empty { display: none; }
     #searchStatus { text-align: center; }
@@ -115,6 +122,17 @@
 
   <div id="status">Getting your location…</div>
   <div class="cards" id="cards"></div>
+  <div class="rain-panel" id="rainPanel" hidden>
+    <div class="chart">
+      <h3>🌧️ Rain next 2 hours</h3>
+      <div id="rain2h"></div>
+    </div>
+    <div class="chart">
+      <h3>🌧️ Rain next 24 hours</h3>
+      <div id="rain24h"></div>
+    </div>
+    <p class="hint" id="rainSource"></p>
+  </div>
   </div>
 
   <div class="tab" id="settingsTab" hidden>
@@ -320,32 +338,133 @@
     }));
 
     // Higher is better. Ideal "feels like" temperature is about 10-15°C. Each penalty is scaled by its weight.
-    function scoreHour(h) {
-      let s = 100;
+    function penalties(h) {
       const t = h.apparentTemp;
-      if (t < 10) s -= (10 - t) * 3 * weights.temp;
-      else if (t > 15) s -= (t - 15) * 4 * weights.temp;
-      s -= h.precipProb * 0.5 * weights.rainChance;
-      s -= h.precip * 20 * weights.rain;
-      if (h.wind > 15) s -= (h.wind - 15) * 1.5 * weights.wind;
-      s -= h.uv * 4 * weights.uv;
-      if (h.humidity > 70) s -= (h.humidity - 70) * 0.5 * weights.humidity;
-      if (!h.isDay) s -= 25 * weights.dark;
-      return Math.max(0, Math.round(s));
+      return {
+        temp: (t < 10 ? (10 - t) * 3 : t > 15 ? (t - 15) * 4 : 0) * weights.temp,
+        rainChance: h.precipProb * 0.5 * weights.rainChance,
+        rain: h.precip * 20 * weights.rain,
+        wind: (h.wind > 15 ? (h.wind - 15) * 1.5 : 0) * weights.wind,
+        uv: h.uv * 4 * weights.uv,
+        humidity: (h.humidity > 70 ? (h.humidity - 70) * 0.5 : 0) * weights.humidity,
+        dark: (h.isDay ? 0 : 25) * weights.dark
+      };
+    }
+
+    function scoreHour(h) {
+      const p = penalties(h);
+      return Math.max(0, Math.round(100 - Object.values(p).reduce((a, b) => a + b, 0)));
+    }
+
+    const rainPanel = document.getElementById('rainPanel');
+    const rain2hEl = document.getElementById('rain2h');
+    const rain24hEl = document.getElementById('rain24h');
+    const rainSourceEl = document.getElementById('rainSource');
+
+    // Rough bounding box of the Netherlands, where the KNMI model is available.
+    function isNetherlands(lat, lon) {
+      return lat >= 50.7 && lat <= 53.7 && lon >= 3.2 && lon <= 7.3;
+    }
+
+    // Buienradar radar forecast: 5-minute lines of "value|HH:MM" (value 0-255), about 2 hours ahead, NL/BE only.
+    async function fetchBuienradar(lat, lon) {
+      try {
+        const res = await fetch(`https://gpsgadget.buienradar.nl/data/raintext?lat=${lat.toFixed(2)}&lon=${lon.toFixed(2)}`);
+        if (!res.ok) return null;
+        const rows = (await res.text()).trim().split(/\r?\n/).map(line => {
+          const [value, time] = line.trim().split('|');
+          const v = parseInt(value, 10);
+          return { t: `0000-00-00T${time}`, v: v > 0 ? Math.pow(10, (v - 109) / 32) : 0 };
+        }).filter(r => r.t.length === 16 && Number.isFinite(r.v));
+        return rows.length ? rows : null;
+      } catch { return null; }
+    }
+
+    // Overwrite default-model values with KNMI values
+    function mergeHourly(target, source) {
+      if (!source) return;
+      Object.keys(source).forEach(key => {
+        if (key === 'time' || !target[key]) return;
+        source.time.forEach((t, i) => {
+          if (target.time[i] === t && source[key][i] != null) target[key][i] = source[key][i];
+        });
+      });
+    }
+
+    function rainSeries(block, key, fallback, startStr, count, scale) {
+      if (!block) { block = fallback; fallback = null; }
+      if (!block) return [];
+      const i0 = block.time.findIndex(t => t >= startStr);
+      if (i0 < 0) return [];
+      return block.time.slice(i0, i0 + count).map((t, j) => {
+        let v = block[key]?.[i0 + j];
+        if (v == null && fallback) {
+          const k = fallback.time.indexOf(t);
+          v = k >= 0 ? fallback[key]?.[k] : null;
+        }
+        return { t, v: (v ?? 0) * scale };
+      });
+    }
+
+    function rainChart(series, labelEvery, probs) {
+      if (!series.length) return '<p class="hint">No data available.</p>';
+      const W = 320, H = 120, top = 16, bottom = 20, plotH = H - top - bottom;
+      const bw = W / series.length;
+      const peak = Math.max(...series.map(s => s.v));
+      const max = Math.max(2, peak);
+      const parts = series.map((s, i) => {
+        const x = i * bw;
+        const bh = s.v / max * plotH;
+        const tip = `${s.t.slice(11, 16)} · ${s.v.toFixed(1)} mm/h${probs?.[i] ? ` · ${probs[i].v.toFixed(0)}% chance` : ''}`;
+        let out = `<rect x="${(x + bw * .1).toFixed(1)}" y="${(top + plotH - bh).toFixed(1)}" width="${(bw * .8).toFixed(1)}" height="${bh.toFixed(1)}" rx="1.5" fill="#7fc8ff"><title>${tip}</title></rect>`;
+        if (i % labelEvery === 0) out += `<text x="${(x + bw / 2).toFixed(1)}" y="${H - 5}" text-anchor="middle">${s.t.slice(11, 16)}</text>`;
+        return out;
+      }).join('');
+      const header = peak > 0
+        ? `<text x="0" y="10">max ${peak.toFixed(1)} mm/h</text>`
+        : `<text x="${W / 2}" y="${top + plotH / 2}" text-anchor="middle">No rain expected</text>`;
+      return `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Rain forecast, max ${peak.toFixed(1)} mm per hour">
+        ${header}
+        <line x1="0" x2="${W}" y1="${top + plotH}" y2="${top + plotH}" stroke="rgba(255,255,255,.4)" />
+        ${parts}</svg>`;
+    }
+
+    // Graphs always show the coming hours from now, independent of the selected date.
+    function renderRain(primary, fallback, now, source, radar) {
+      const nowStr = now.toISOString().slice(0, 16);
+      const quarter = nowStr.slice(0, 14) + String(Math.floor(+nowStr.slice(14, 16) / 15) * 15).padStart(2, '0');
+      const hour = nowStr.slice(0, 13) + ':00';
+      const s2 = radar || rainSeries(primary.minutely_15, 'precipitation', fallback?.minutely_15, quarter, 8, 4);
+      const s24 = rainSeries(primary.hourly, 'precipitation', fallback?.hourly, hour, 24, 1);
+      const p24 = rainSeries(primary.hourly, 'precipitation_probability', fallback?.hourly, hour, 24, 1);
+      rain2hEl.innerHTML = rainChart(s2, radar ? 6 : 2);
+      rain24hEl.innerHTML = rainChart(s24, 4, p24);
+      rainSourceEl.textContent = radar
+        ? `Source: Buienradar.nl radar (2 h), ${source} (24 h). Hover or tap a bar for details.`
+        : `Source: ${source}. Hover or tap a bar for details.`;
+      rainPanel.hidden = false;
     }
 
     async function load(lat, lon, label) {
       statusEl.textContent = 'Fetching the forecast…';
       cardsEl.innerHTML = '';
-      const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}` +
-        '&hourly=apparent_temperature,temperature_2m,precipitation_probability,precipitation,wind_speed_10m,uv_index,relative_humidity_2m,is_day' +
-        `&timezone=auto&forecast_days=16`;
-      const res = await fetch(url);
+      const fields = 'apparent_temperature,temperature_2m,precipitation_probability,precipitation,wind_speed_10m,uv_index,relative_humidity_2m,is_day';
+      const base = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&hourly=${fields}&minutely_15=precipitation&timezone=auto`;
+      // For Dutch locations also fetch KNMI's HARMONIE model (about 2 days ahead) and Buienradar's radar forecast (2 hours).
+      const [res, knmi, radar] = await Promise.all([
+        fetch(base + '&forecast_days=16'),
+        isNetherlands(lat, lon)
+          ? fetch(base + '&models=knmi_seamless&forecast_days=2').then(r => r.ok ? r.json() : null).catch(() => null)
+          : null,
+        isNetherlands(lat, lon) ? fetchBuienradar(lat, lon) : null
+      ]);
       if (!res.ok) throw new Error('Weather service unavailable');
       const data = await res.json();
       const d = data.hourly;
+      if (knmi) mergeHourly(d, knmi.hourly);
 
       const now = new Date(Date.now() + data.utc_offset_seconds * 1000);
+      renderRain(knmi || data, knmi ? data : null, now, knmi ? 'KNMI HARMONIE (via Open-Meteo)' : 'Open-Meteo', radar);
       const locToday = now.toISOString().slice(0, 10);
       if (!dateInput.value) dateInput.value = locToday;
       let selDate = dateInput.value;
@@ -395,7 +514,8 @@
           blocked: isBlocked(start, duration),
           score: Math.round(samples.reduce((s, c) => s + scoreHour(c), 0) / samples.length),
           temp: avg('temp'), apparentTemp: avg('apparentTemp'), precipProb: avg('precipProb'),
-          wind: avg('wind'), uv: avg('uv'), humidity: avg('humidity')
+          precip: avg('precip'), wind: avg('wind'), uv: avg('uv'), humidity: avg('humidity'),
+          darkShare: samples.filter(c => !c.isDay).length / samples.length
         });
       }
 
@@ -422,8 +542,9 @@
 
       statusEl.textContent = onlyBlocked
         ? `⚠️ No free time left in ${label}; showing the best option during a blocked time.`
-        : `Forecast for ${label}`;
+        : `Forecast for ${label}${knmi ? ' · KNMI model' : ''}`;
       const medals = ['🥇', '🥈', '🥉'];
+      const light = h => h.darkShare === 0 ? 'Daylight' : h.darkShare === 1 ? 'Dark' : `${Math.round(h.darkShare * 100)}% in the dark`;
       cardsEl.innerHTML = best.map((h, i) => `
         <div class="card${h.blocked ? ' warning' : ''}">
           <div class="rank">${h.blocked ? '⚠️' : medals[i]}</div>
@@ -433,9 +554,11 @@
           <ul>
             <li>🌡️ ${h.temp.toFixed(0)}°C (feels ${h.apparentTemp.toFixed(0)}°C)</li>
             <li>🌧️ ${h.precipProb.toFixed(0)}% rain</li>
+            <li>☔ ${h.precip.toFixed(1)} mm/h rain</li>
             <li>💨 ${h.wind.toFixed(0)} km/h wind</li>
             <li>☀️ UV ${h.uv.toFixed(1)}</li>
             <li>💧 ${h.humidity.toFixed(0)}% humidity</li>
+            <li>🌙 ${light(h)}</li>
           </ul>
         </div>`).join('');
     }
