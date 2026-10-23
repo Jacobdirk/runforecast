@@ -84,7 +84,7 @@
   <div id="plannerLocation" class="location-slot">
   <div id="locationBlock" class="location-block">
   <form id="searchForm">
-    <input id="searchInput" type="text" placeholder="Search a city, e.g. New York" required>
+    <input id="searchInput" type="text" placeholder="Search a city, e.g. New York" aria-label="City" required>
     <button type="submit">Search</button>
     <button type="button" id="geoBtn">📍 Use my location</button>
   </form>
@@ -100,11 +100,11 @@
       <input type="date" id="runDate" autocomplete="off">
       <button type="button" id="nextDay" class="day-arrow" aria-label="Next day">▶</button>
     </span>
-    <span class="settings-label">Start a run between</span>
+    <span class="settings-label" id="runWindowLabel">Start a run between</span>
     <span class="time-range">
-      <input type="time" id="fromTime" value="05:00">
+      <input type="time" id="fromTime" value="05:00" aria-label="Earliest start time">
       <span>and</span>
-      <input type="time" id="toTime" value="22:00">
+      <input type="time" id="toTime" value="22:00" aria-label="Latest start time">
     </span>
     <span class="duration">
       <label for="duration">Run duration</label>
@@ -228,7 +228,7 @@
       blocked.forEach((b, i) => {
         const row = document.createElement('div');
         row.className = 'block-row';
-        row.innerHTML = '<input type="time"><span>to</span><input type="time"><button type="button" aria-label="Remove">✕</button>';
+        row.innerHTML = '<input type="time" aria-label="Blocked from"><span>to</span><input type="time" aria-label="Blocked until"><button type="button" aria-label="Remove">✕</button>';
         const [fromEl, toEl] = row.querySelectorAll('input');
         fromEl.value = b.from;
         toEl.value = b.to;
@@ -538,5 +538,4 @@
     }
   </script>
 </body>
-</html>
 </html>
