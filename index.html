@@ -32,6 +32,22 @@
     .time-range, .duration { display: inline-flex; align-items: center; gap: .5rem; }
     #settings #duration { width: 5rem; }
     .card { flex: 1 1 220px; max-width: 320px; }
+    .card.warning { outline: 2px solid #ffb300; }
+    .warn { background: rgba(255,179,0,.2); border-radius: 8px; padding: .4rem .6rem; font-size: .85rem; margin-bottom: .5rem; }
+    .tabs { display: flex; gap: .5rem; margin-bottom: 1rem; width: 100%; max-width: 720px; }
+    .tabs button { flex: 1; background: rgba(255,255,255,.15); color: #fff; }
+    .tabs button.active { background: #fff; color: #1e3c72; font-weight: bold; }
+    .tab { width: 100%; display: flex; flex-direction: column; align-items: center; }
+    .tab[hidden] { display: none; }
+    .panel { width: 100%; max-width: 720px; background: rgba(255,255,255,.12); border-radius: 16px; padding: 1rem 1.25rem; margin-bottom: 1rem; }
+    .panel h2 { font-size: 1.15rem; margin: 0 0 .75rem; }
+    .weight { display: grid; grid-template-columns: 9rem 1fr 3rem; align-items: center; gap: .5rem; margin: .4rem 0; }
+    .weight input { width: 100%; min-height: auto; padding: 0; flex: none; }
+    .weight output { text-align: right; }
+    .block-row { display: flex; align-items: center; gap: .5rem; margin: .4rem 0; }
+    .block-row input { flex: 1 1 0; min-width: 0; width: auto; }
+    .block-row button { background: rgba(255,255,255,.2); color: #fff; }
+    .hint { font-size: .85rem; opacity: .8; margin: .25rem 0 .5rem; }
 
     @media (max-width: 600px) {
       body { padding: 1rem .75rem; }
@@ -46,12 +62,19 @@
       .card { width: 100%; max-width: none; padding: 1rem 1.25rem; }
       .rank { font-size: 1.6rem; }
       .time { font-size: 1.5rem; }
+      .weight { grid-template-columns: 7rem 1fr 2.5rem; }
     }
   </style>
 </head>
 <body>
   <h1>🏃 Best Times to Run Today</h1>
 
+  <div class="tabs">
+    <button type="button" class="active" data-tab="mainTab">🏠 Planner</button>
+    <button type="button" data-tab="settingsTab">⚙️ Settings</button>
+  </div>
+
+  <div class="tab" id="mainTab">
   <form id="searchForm">
     <input id="searchInput" type="text" placeholder="Search a city, e.g. Urk" required>
     <button type="submit">Search</button>
@@ -75,6 +98,22 @@
 
   <div id="status">Getting your location…</div>
   <div class="cards" id="cards"></div>
+  </div>
+
+  <div class="tab" id="settingsTab" hidden>
+    <div class="panel">
+      <h2>Score weights</h2>
+      <p class="hint">How much each factor counts. 0 = ignore, 1 = default, 3 = very important.</p>
+      <div id="weights"></div>
+      <button type="button" id="resetWeights">Reset to defaults</button>
+    </div>
+    <div class="panel">
+      <h2>Blocked times</h2>
+      <p class="hint">Times when you can't run, e.g. work or meetings. Runs won't overlap these.</p>
+      <div id="blockedList"></div>
+      <button type="button" id="addBlocked">+ Add blocked time</button>
+    </div>
+  </div>
 
   <script>
     const statusEl = document.getElementById('status');
@@ -87,16 +126,113 @@
     const durationInput = document.getElementById('duration');
     let lastLocation = null;
 
-    function setCookie(name, value) {
-      document.cookie = `${name}=${encodeURIComponent(value)}; max-age=${60 * 60 * 24 * 365}; path=/; SameSite=Lax`;
+    function setSetting(name, value) {
       try { localStorage.setItem(name, value); } catch { }
     }
 
-    function getCookie(name) {
-      const match = document.cookie.split('; ').find(c => c.startsWith(name + '='));
-      if (match) return decodeURIComponent(match.slice(name.length + 1));
+    function getSetting(name) {
       try { return localStorage.getItem(name); } catch { return null; }
     }
+
+    function getJson(name, fallback) {
+      try { return JSON.parse(getSetting(name)) ?? fallback; } catch { return fallback; }
+    }
+
+    function rerun() {
+      if (lastLocation) run(lastLocation.lat, lastLocation.lon, lastLocation.label);
+    }
+
+    const weightDefs = [
+      { key: 'temp', label: '🌡️ Temperature' },
+      { key: 'rainChance', label: '🌧️ Rain chance' },
+      { key: 'rain', label: '☔ Rain amount' },
+      { key: 'wind', label: '💨 Wind' },
+      { key: 'uv', label: '☀️ UV' },
+      { key: 'humidity', label: '💧 Humidity' },
+      { key: 'dark', label: '🌙 Darkness' }
+    ];
+    const weights = Object.assign(Object.fromEntries(weightDefs.map(w => [w.key, 1])), getJson('weights', {}));
+    let blocked = getJson('blocked', []);
+
+    const weightsEl = document.getElementById('weights');
+    function renderWeights() {
+      weightsEl.innerHTML = '';
+      weightDefs.forEach(w => {
+        const row = document.createElement('label');
+        row.className = 'weight';
+        row.innerHTML = `<span>${w.label}</span><input type="range" min="0" max="3" step="0.1"><output></output>`;
+        const range = row.querySelector('input');
+        const out = row.querySelector('output');
+        range.value = weights[w.key];
+        out.textContent = (+weights[w.key]).toFixed(1);
+        range.addEventListener('input', () => {
+          weights[w.key] = +range.value;
+          out.textContent = weights[w.key].toFixed(1);
+          setSetting('weights', JSON.stringify(weights));
+        });
+        range.addEventListener('change', rerun);
+        weightsEl.appendChild(row);
+      });
+    }
+
+    document.getElementById('resetWeights').onclick = () => {
+      weightDefs.forEach(w => weights[w.key] = 1);
+      setSetting('weights', JSON.stringify(weights));
+      renderWeights();
+      rerun();
+    };
+
+    const blockedListEl = document.getElementById('blockedList');
+    function saveBlocked() {
+      setSetting('blocked', JSON.stringify(blocked));
+      rerun();
+    }
+
+    function renderBlocked() {
+      blockedListEl.innerHTML = blocked.length ? '' : '<p class="hint">No blocked times.</p>';
+      blocked.forEach((b, i) => {
+        const row = document.createElement('div');
+        row.className = 'block-row';
+        row.innerHTML = '<input type="time"><span>to</span><input type="time"><button type="button" aria-label="Remove">✕</button>';
+        const [fromEl, toEl] = row.querySelectorAll('input');
+        fromEl.value = b.from;
+        toEl.value = b.to;
+        fromEl.addEventListener('change', () => { b.from = fromEl.value; saveBlocked(); });
+        toEl.addEventListener('change', () => { b.to = toEl.value; saveBlocked(); });
+        row.querySelector('button').onclick = () => {
+          blocked.splice(i, 1);
+          renderBlocked();
+          saveBlocked();
+        };
+        blockedListEl.appendChild(row);
+      });
+    }
+
+    document.getElementById('addBlocked').onclick = () => {
+      blocked.push({ from: '09:00', to: '17:00' });
+      renderBlocked();
+      saveBlocked();
+    };
+
+    // Does a run [start, start + duration) in minutes since today's midnight overlap a blocked range?
+    function isBlocked(start, duration) {
+      const end = start + duration;
+      return blocked.some(b => {
+        if (!b.from || !b.to) return false;
+        const bs = toMinutes(b.from, 0);
+        let be = toMinutes(b.to, 0);
+        if (be <= bs) be += 1440;
+        return [-1440, 0, 1440].some(o => start < be + o && end > bs + o);
+      });
+    }
+
+    document.querySelectorAll('.tabs button').forEach(btn => btn.onclick = () => {
+      document.querySelectorAll('.tabs button').forEach(b => b.classList.toggle('active', b === btn));
+      document.querySelectorAll('.tab').forEach(t => t.hidden = t.id !== btn.dataset.tab);
+    });
+
+    renderWeights();
+    renderBlocked();
 
     function getDuration() {
       const v = parseInt(durationInput.value, 10);
@@ -109,29 +245,29 @@
       return h * 60 + m;
     }
 
-    fromInput.value = getCookie('runFrom') || fromInput.value;
-    toInput.value = getCookie('runTo') || toInput.value;
-    durationInput.value = getCookie('runDuration') || durationInput.value;
+    fromInput.value = getSetting('runFrom') || fromInput.value;
+    toInput.value = getSetting('runTo') || toInput.value;
+    durationInput.value = getSetting('runDuration') || durationInput.value;
 
     [fromInput, toInput, durationInput].forEach(input => input.addEventListener('change', () => {
-      setCookie('runFrom', fromInput.value);
-      setCookie('runTo', toInput.value);
-      setCookie('runDuration', getDuration());
-      if (lastLocation) run(lastLocation.lat, lastLocation.lon, lastLocation.label);
+      setSetting('runFrom', fromInput.value);
+      setSetting('runTo', toInput.value);
+      setSetting('runDuration', getDuration());
+      rerun();
     }));
 
-    // Higher is better. Ideal "feels like" temperature is about 10-15°C.
+    // Higher is better. Ideal "feels like" temperature is about 10-15°C. Each penalty is scaled by its weight.
     function scoreHour(h) {
       let s = 100;
       const t = h.apparentTemp;
-      if (t < 10) s -= (10 - t) * 3;
-      else if (t > 15) s -= (t - 15) * 4;
-      s -= h.precipProb * 0.5;
-      s -= h.precip * 20;
-      if (h.wind > 15) s -= (h.wind - 15) * 1.5;
-      s -= h.uv * 4;
-      if (h.humidity > 70) s -= (h.humidity - 70) * 0.5;
-      if (!h.isDay) s -= 25;
+      if (t < 10) s -= (10 - t) * 3 * weights.temp;
+      else if (t > 15) s -= (t - 15) * 4 * weights.temp;
+      s -= h.precipProb * 0.5 * weights.rainChance;
+      s -= h.precip * 20 * weights.rain;
+      if (h.wind > 15) s -= (h.wind - 15) * 1.5 * weights.wind;
+      s -= h.uv * 4 * weights.uv;
+      if (h.humidity > 70) s -= (h.humidity - 70) * 0.5 * weights.humidity;
+      if (!h.isDay) s -= 25 * weights.dark;
       return Math.max(0, Math.round(s));
     }
 
@@ -185,6 +321,7 @@
         const avg = k => samples.reduce((s, c) => s + c[k], 0) / samples.length;
         slots.push({
           start,
+          blocked: isBlocked(start, duration),
           score: Math.round(samples.reduce((s, c) => s + scoreHour(c), 0) / samples.length),
           temp: avg('temp'), apparentTemp: avg('apparentTemp'), precipProb: avg('precipProb'),
           wind: avg('wind'), uv: avg('uv'), humidity: avg('humidity')
@@ -196,23 +333,32 @@
         return;
       }
 
-      // Pick the 3 best starts, far enough apart so the runs don't overlap.
+      // Only use blocked slots if nothing else is available; then show the single best one with a warning.
+      const free = slots.filter(s => !s.blocked);
+      const onlyBlocked = !free.length;
+      const candidates = onlyBlocked ? slots : free;
+      const maxPicks = onlyBlocked ? 1 : 3;
+
+      // Pick the best starts, far enough apart so the runs don't overlap.
       const gap = Math.max(duration, 60);
       const best = [];
-      for (const s of [...slots].sort((a, b) => b.score - a.score || a.start - b.start)) {
+      for (const s of [...candidates].sort((a, b) => b.score - a.score || a.start - b.start)) {
         if (best.every(b => Math.abs(b.start - s.start) >= gap)) best.push(s);
-        if (best.length === 3) break;
+        if (best.length === maxPicks) break;
       }
 
       const fmt = min => `${String(Math.floor(min / 60) % 24).padStart(2, '0')}:${String(min % 60).padStart(2, '0')}`;
 
-      statusEl.textContent = `Forecast for ${label}`;
+      statusEl.textContent = onlyBlocked
+        ? `⚠️ No free time left in ${label}; showing the best option during a blocked time.`
+        : `Forecast for ${label}`;
       const medals = ['🥇', '🥈', '🥉'];
       cardsEl.innerHTML = best.map((h, i) => `
-        <div class="card">
-          <div class="rank">${medals[i]}</div>
+        <div class="card${h.blocked ? ' warning' : ''}">
+          <div class="rank">${h.blocked ? '⚠️' : medals[i]}</div>
           <div class="time">${fmt(h.start)}</div>
           <div class="score">until ${fmt(h.start + duration)} · Score: ${h.score}/100</div>
+          ${h.blocked ? '<div class="warn">Overlaps one of your blocked times.</div>' : ''}
           <ul>
             <li>🌡️ ${h.temp.toFixed(0)}°C (feels ${h.apparentTemp.toFixed(0)}°C)</li>
             <li>🌧️ ${h.precipProb.toFixed(0)}% rain</li>
@@ -225,13 +371,13 @@
 
     function run(lat, lon, label) {
       lastLocation = { lat, lon, label };
-      setCookie('lastLocation', JSON.stringify(lastLocation));
+      setSetting('lastLocation', JSON.stringify(lastLocation));
       load(lat, lon, label).catch(err => statusEl.textContent = 'Error: ' + err.message);
     }
 
     function getSavedLocation() {
       try {
-        const loc = JSON.parse(getCookie('lastLocation'));
+        const loc = JSON.parse(getSetting('lastLocation'));
         return loc && Number.isFinite(loc.lat) && Number.isFinite(loc.lon) ? loc : null;
       } catch { return null; }
     }
